@@ -2,3 +2,4 @@
   timestamp: 1792686544
   prompt: "python code to read rst discourse treebank, convert trees to python format, right binarize and convert to coarse labels"
   filename: rstdt.py
+  model: "Opus 5.5 Medium"
