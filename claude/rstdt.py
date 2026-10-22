@@ -14,7 +14,7 @@ As a library:
     t.to_tuple()                                 # plain nested tuples
 """
 
-from __future__ import annotations
+#from __future__ import annotations # not used?
 
 import argparse
 import glob
@@ -22,7 +22,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, cast
 
 # ---------------------------------------------------------------------------
 # Coarse relation mapping (18 classes; Carlson et al. 2001, Table 1)
@@ -188,10 +188,12 @@ def _build(sexp: list) -> RSTNode:
     return node
 
 
-def read_dis(path: str) -> RSTNode:
+def read_dis(path: str) -> Optional[RSTNode]:
     """Parse one .dis file into an RSTNode tree (original n-ary, fine-grained)."""
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
+        if "TT_ERR" in text:
+            return None
     return _build(_tokens_to_lists(_TOKEN_RE.findall(text)))
 
 
@@ -242,8 +244,11 @@ def coarsen(node: RSTNode) -> RSTNode:
 # Corpus loading
 # ---------------------------------------------------------------------------
 
-def load_tree(path: str, binarize: bool = True, coarse: bool = True) -> RSTNode:
+def load_tree(path: str, binarize: bool = True, coarse: bool = True) -> Optional[RSTNode]:
+    print(path)
     tree = read_dis(path)
+    if tree is None:
+        return None
     if binarize:
         right_binarize(tree)
     if coarse:
@@ -259,7 +264,9 @@ def load_corpus(directory: str, binarize: bool = True, coarse: bool = True) -> d
     trees = {}
     for p in paths:
         doc_id = os.path.basename(p).replace(".out.dis", "").replace(".dis", "")
-        trees[doc_id] = load_tree(p, binarize, coarse)
+        maybe_tree = load_tree(p, binarize, coarse)
+        if maybe_tree is not None:
+            trees[doc_id] = cast(RSTNode, maybe_tree)
     return trees
 
 
