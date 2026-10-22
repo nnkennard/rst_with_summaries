@@ -1,26 +1,21 @@
 """Shift-reduce RST discourse parser over gold EDUs.
 
 Reads RST-DT .dis trees, right-binarizes them, derives static-oracle
-shift/reduce action sequences, and trains an MLP to predict actions from
-frozen SpanBERT representations of the top two stack spans and the next EDU
-([first token; last token; mean] per span) together with sparse lexical and
-structural features approximating Feng & Eisenstein (2014). Evaluates with RST-Parseval
-(span / nuclearity / relation).
+shift/reduce action sequences, trains an averaged perceptron to predict
+actions, and evaluates with RST-Parseval (span / nuclearity / relation).
 
-    python rst_shift_reduce.py --cache spanbert.pt          # train on TRAINING, eval on TEST
-    python rst_shift_reduce.py --cache spanbert.pt --save model.pt
+    python rst_shift_reduce.py                # train on TRAINING, eval on TEST
+    python rst_shift_reduce.py --epochs 10 --save model.pkl
 """
 
 import argparse
 import glob
 import os
+import pickle
+import random
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "rst_discourse_treebank", "data", "RSTtrees-WSJ-main-1.0")
@@ -159,17 +154,18 @@ def leaves(node: Node) -> list[Node]:
     return [l for c in node.children for l in leaves(c)]
 
 
-def labeled_spans(node: Node) -> set[tuple]:
-    """(start, end, nuclearity-label, relation-label) for each child of each internal node."""
-    out = set()
+def labeled_spans(node: Node, depth: int = 1) -> dict[tuple, int]:
+    """(start, end, nuclearity-label, relation-label) -> depth, for each child of each
+    internal node. The root's children are at depth 1."""
+    out = {}
     if node.is_leaf:
         return out
     left, right = node.children
     nuc, rel = node.label.split("-", 1)
     for child, n in ((left, nuc[0]), (right, nuc[1])):
         r = rel if n == "S" or nuc == "NN" else "span"
-        out.add((child.start, child.end, n, r))
-        out |= labeled_spans(child)
+        out[(child.start, child.end, n, r)] = depth
+        out.update(labeled_spans(child, depth + 1))
     return out
 
 
@@ -226,10 +222,6 @@ class State:
         self.stack.append(Node(left.start, right.end, children=[left, right], label=label))
 
 
-# ---------------------------------------------------------------------------
-# Sparse features (approximating Feng & Eisenstein 2014, Table 2)
-# ---------------------------------------------------------------------------
-
 def _words(text: str) -> list[str]:
     return re.findall(r"\w+|[^\w\s]", text.lower())
 
@@ -278,194 +270,92 @@ def features(state: State) -> list[str]:
     return feats
 
 
-
 # ---------------------------------------------------------------------------
-# SpanBERT features
-# ---------------------------------------------------------------------------
-
-SPANBERT = "SpanBERT/spanbert-base-cased"
-TOKENIZER = "bert-base-cased"   # SpanBERT reuses BERT-base-cased's vocabulary
-
-
-def default_device() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-class SpanEncoder:
-    """Contextual token vectors for a whole document from frozen SpanBERT.
-
-    Documents longer than 512 subwords are encoded in overlapping windows; each
-    token keeps the vector from the window in which it is most central.
-    """
-
-    def __init__(self, device: str, window: int = 510, stride: int = 255):
-        self.tok = AutoTokenizer.from_pretrained(TOKENIZER)
-        self.bert = AutoModel.from_pretrained(SPANBERT).to(device).eval()
-        self.device, self.window, self.stride = device, window, stride
-
-    @torch.no_grad()
-    def encode(self, edus: list[Node]) -> dict:
-        ids, edu_bounds = [], []
-        for e in edus:
-            piece = self.tok(e.text, add_special_tokens=False)["input_ids"] or [self.tok.unk_token_id]
-            edu_bounds.append((len(ids), len(ids) + len(piece) - 1))
-            ids += piece
-        n = len(ids)
-        out = torch.zeros(n, self.bert.config.hidden_size)
-        best = torch.full((n,), float("inf"))
-        starts = list(range(0, max(n - self.window, 0) + 1, self.stride))
-        if starts[-1] + self.window < n:
-            starts.append(n - self.window)
-        for s in starts:
-            chunk = ids[s:s + self.window]
-            inp = torch.tensor([[self.tok.cls_token_id] + chunk + [self.tok.sep_token_id]],
-                               device=self.device)
-            h = self.bert(input_ids=inp).last_hidden_state[0, 1:-1].float().cpu()
-            pos = torch.arange(s, s + len(chunk))
-            dist = (pos - (s + (len(chunk) - 1) / 2)).abs()
-            take = dist < best[pos]
-            out[pos[take]] = h[take]
-            best[pos[take]] = dist[take]
-        cums = torch.cat([torch.zeros(1, out.size(1)), out.cumsum(0)])
-        return {"tokens": out, "cumsum": cums, "edu_bounds": edu_bounds}
-
-
-def span_vector(enc: dict, start: int, end: int) -> torch.Tensor:
-    """[first token; last token; mean] over EDUs start..end (1-based, inclusive)."""
-    a = enc["edu_bounds"][start - 1][0]
-    b = enc["edu_bounds"][end - 1][1]
-    mean = (enc["cumsum"][b + 1] - enc["cumsum"][a]) / (b - a + 1)
-    return torch.cat([enc["tokens"][a], enc["tokens"][b], mean])
-
-
-def config_spans(state: State) -> list[tuple[int, int] | None]:
-    """Spans of the parser configuration's feature slots: s1, s0, q0."""
-    s = state.stack
-    q0 = state.edus[state.buffer] if state.buffer < len(state.edus) else None
-    return [(n.start, n.end) if n else None
-            for n in (s[-2] if len(s) > 1 else None, s[-1] if s else None, q0)]
-
-
-# ---------------------------------------------------------------------------
-# Action classifier
+# Averaged perceptron
 # ---------------------------------------------------------------------------
 
-class ActionMLP(nn.Module):
-    """One hidden layer fed by both the SpanBERT slot vectors and the sparse
-    indicator features (summed embeddings of feature ids = a linear layer on
-    their one-hot encoding)."""
+class Perceptron:
+    def __init__(self):
+        self.weights = defaultdict(lambda: defaultdict(float))
+        self._totals = defaultdict(float)
+        self._stamps = defaultdict(int)
+        self.t = 0
+        self.labels: set[str] = set()
 
-    def __init__(self, span_dim: int, n_feats: int, n_actions: int, n_slots: int = 3,
-                 hidden: int = 512, dropout: float = 0.3):
-        super().__init__()
-        self.null = nn.Parameter(torch.zeros(n_slots, span_dim))
-        self.dense = nn.Sequential(nn.Dropout(dropout), nn.Linear(n_slots * span_dim, hidden))
-        self.sparse = nn.Embedding(n_feats, hidden)   # nn.EmbeddingBag has no MPS kernel
-        self.out = nn.Sequential(nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden, n_actions))
+    def score(self, feats):
+        scores = defaultdict(float)
+        for f in feats:
+            for label, w in self.weights.get(f, {}).items():
+                scores[label] += w
+        return scores
 
-    def forward(self, slots, present, feat_ids, feat_rows) -> torch.Tensor:
-        # slots: (B, n_slots, span_dim); present: (B, n_slots) bool;
-        # feat_ids: flattened sparse feature ids; feat_rows: batch row of each id
-        slots = torch.where(present.unsqueeze(-1), slots, self.null.expand_as(slots))
-        h = self.dense(slots.flatten(1))
-        return self.out(h.index_add(0, feat_rows, self.sparse(feat_ids)))
+    def predict(self, feats, state: State):
+        scores = self.score(feats)
+        legal = [a for a in self.labels if state.legal(a)]
+        return max(legal, key=lambda a: (scores.get(a, 0.0), a))
 
+    def _bump(self, f, label, delta):
+        key = (f, label)
+        self._totals[key] += (self.t - self._stamps[key]) * self.weights[f][label]
+        self._stamps[key] = self.t
+        self.weights[f][label] += delta
 
-def pack_feats(id_lists: list[list[int]], device) -> tuple[torch.Tensor, torch.Tensor]:
-    flat = torch.tensor([i for ids in id_lists for i in ids], dtype=torch.long)
-    rows = torch.tensor([r for r, ids in enumerate(id_lists) for _ in ids], dtype=torch.long)
-    return flat.to(device), rows.to(device)
+    def update(self, gold, guess, feats):
+        self.t += 1
+        if gold == guess:
+            return
+        for f in feats:
+            self._bump(f, gold, 1.0)
+            self._bump(f, guess, -1.0)
 
+    def average(self):
+        for f, row in self.weights.items():
+            for label, w in row.items():
+                key = (f, label)
+                total = self._totals[key] + (self.t - self._stamps[key]) * w
+                row[label] = total / max(self.t, 1)
 
-def featurize(enc: dict, state: State, span_dim: int, vocab: dict[str, int]):
-    spans = config_spans(state)
-    slots = torch.stack([span_vector(enc, *sp) if sp else torch.zeros(span_dim) for sp in spans])
-    present = torch.tensor([sp is not None for sp in spans])
-    feat_ids = [vocab[f] for f in features(state) if f in vocab]   # unseen features are dropped
-    return slots, present, feat_ids
+    def to_plain(self):
+        return {"weights": {f: dict(r) for f, r in self.weights.items()},
+                "labels": sorted(self.labels)}
+
+    @classmethod
+    def from_plain(cls, data):
+        model = cls()
+        for f, row in data["weights"].items():
+            model.weights[f].update(row)
+        model.labels = set(data["labels"])
+        return model
 
 
 class ShiftReduceParser:
-    def __init__(self, encoder: SpanEncoder, actions: list[str] | None = None,
-                 vocab: dict[str, int] | None = None, model: ActionMLP | None = None,
-                 cache: dict | None = None):
-        self.encoder = encoder
-        self.actions = actions or []
-        self.vocab = vocab or {}
-        self.model = model
-        self.cache = cache if cache is not None else {}
-        self.span_dim = 3 * encoder.bert.config.hidden_size
+    def __init__(self, model: Perceptron | None = None):
+        self.model = model or Perceptron()
 
-    def encode(self, name: str, edus: list[Node]) -> dict:
-        if name not in self.cache:
-            self.cache[name] = self.encoder.encode(edus)
-        return self.cache[name]
-
-    def legal_mask(self, state: State) -> torch.Tensor:
-        return torch.tensor([state.legal(a) for a in self.actions])
-
-    def train(self, docs, epochs=10, seed=0, lr=1e-3, batch_size=64, hidden=512, dropout=0.3):
-        torch.manual_seed(seed)
-        self.actions = sorted({a for _, tree in docs for a in oracle(tree)})
-        index = {a: i for i, a in enumerate(self.actions)}
-        slots, present, feat_ids, gold, legal = [], [], [], [], []
-        for name, tree in docs:
-            edus = leaves(tree)
-            enc = self.encode(name, edus)
-            state = State(edus)
-            for action in oracle(tree):     # static oracle: states follow gold
-                for f in features(state):
-                    self.vocab.setdefault(f, len(self.vocab))
-                x, p, ids = featurize(enc, state, self.span_dim, self.vocab)
-                slots.append(x)
-                present.append(p)
-                feat_ids.append(ids)
-                gold.append(index[action])
-                legal.append(self.legal_mask(state))
-                state.apply(action)
-        slots, present = torch.stack(slots), torch.stack(present)
-        gold, legal = torch.tensor(gold), torch.stack(legal)
-        print(f"{len(gold)} oracle states, {len(self.actions)} actions, "
-              f"{len(self.vocab)} sparse features")
-
-        device = self.encoder.device
-        self.model = ActionMLP(self.span_dim, len(self.vocab), len(self.actions), hidden=hidden,
-                               dropout=dropout).to(device)
-        opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+    def train(self, docs, epochs=5, seed=0):
+        rng = random.Random(seed)
+        examples = [(leaves(tree), oracle(tree)) for _, tree in docs]
+        for _, actions in examples:
+            self.model.labels.update(actions)
         for epoch in range(epochs):
-            self.model.train()
-            perm = torch.randperm(len(gold))
-            correct = total_loss = 0.0
-            for i in range(0, len(perm), batch_size):
-                b = perm[i:i + batch_size]
-                logits = self.model(slots[b].to(device), present[b].to(device),
-                                    *pack_feats([feat_ids[j] for j in b], device))
-                logits = logits.masked_fill(~legal[b].to(device), float("-inf"))
-                loss = F.cross_entropy(logits, gold[b].to(device))
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-                total_loss += loss.item() * len(b)
-                correct += (logits.argmax(-1).cpu() == gold[b]).sum().item()
-            print(f"epoch {epoch + 1}: loss {total_loss / len(gold):.4f}, "
-                  f"train action accuracy {correct / len(gold):.4f}")
-        self.model.eval()
+            rng.shuffle(examples)
+            correct = total = 0
+            for edus, actions in examples:
+                state = State(edus)
+                for gold in actions:
+                    feats = features(state)
+                    guess = self.model.predict(feats, state)
+                    self.model.update(gold, guess, feats)
+                    correct += gold == guess
+                    total += 1
+                    state.apply(gold)   # static oracle: always follow gold
+            print(f"epoch {epoch + 1}: train action accuracy {correct / total:.4f}")
+        self.model.average()
 
-    @torch.no_grad()
-    def parse(self, name: str, edus: list[Node]) -> Node:
-        enc = self.encode(name, edus)
-        device = self.encoder.device
+    def parse(self, edus: list[Node]) -> Node:
         state = State(edus)
         while not state.is_final():
-            x, p, ids = featurize(enc, state, self.span_dim, self.vocab)
-            logits = self.model(x[None].to(device), p[None].to(device),
-                                *pack_feats([ids], device))[0].cpu()
-            logits = logits.masked_fill(~self.legal_mask(state), float("-inf"))
-            state.apply(self.actions[logits.argmax().item()])
+            state.apply(self.model.predict(features(state), state))
         return state.stack[0]
 
 
@@ -473,57 +363,85 @@ class ShiftReduceParser:
 # Evaluation (RST-Parseval over binarized trees, gold EDUs)
 # ---------------------------------------------------------------------------
 
-def evaluate(parser: ShiftReduceParser, docs) -> dict[str, float]:
-    hits = {"span": 0, "nuclearity": 0, "relation": 0, "full": 0}
-    n_gold = n_pred = 0
-    for name, gold_tree in docs:
-        pred_tree = parser.parse(name, leaves(gold_tree))
+_PROJECTIONS = {
+    "span": lambda s: s[:2],
+    "nuclearity": lambda s: s[:3],
+    "relation": lambda s: (s[0], s[1], s[3]),
+    "full": lambda s: s,
+}
+
+
+def evaluate(parser: ShiftReduceParser, docs, max_depth: int = 10) -> dict:
+    """Micro-averaged F1 overall and stratified by depth from the root.
+
+    Per depth, precision counts predicted spans at that depth in the predicted tree
+    and recall counts gold spans at that depth in the gold tree; a span is correct if
+    it appears anywhere in the other tree. Depths beyond max_depth share one bucket.
+    """
+    # counts[depth][metric] = [pred hits, gold hits]; n_pred/n_gold per depth
+    counts = defaultdict(lambda: {k: [0, 0] for k in _PROJECTIONS})
+    n_pred, n_gold = defaultdict(int), defaultdict(int)
+    for _, gold_tree in docs:
+        pred_tree = parser.parse(leaves(gold_tree))
         gold, pred = labeled_spans(gold_tree), labeled_spans(pred_tree)
-        n_gold += len(gold)
-        n_pred += len(pred)
-        for proj, key in ((lambda s: s[:2], "span"), (lambda s: s[:3], "nuclearity"),
-                          (lambda s: (s[0], s[1], s[3]), "relation"), (lambda s: s, "full")):
-            hits[key] += len({proj(s) for s in gold} & {proj(s) for s in pred})
-    return {k: 2 * v / (n_gold + n_pred) for k, v in hits.items()}
+        for s, d in pred.items():
+            n_pred[min(d, max_depth)] += 1
+        for s, d in gold.items():
+            n_gold[min(d, max_depth)] += 1
+        for key, proj in _PROJECTIONS.items():
+            gold_proj, pred_proj = {proj(s) for s in gold}, {proj(s) for s in pred}
+            for s, d in pred.items():
+                counts[min(d, max_depth)][key][0] += proj(s) in gold_proj
+            for s, d in gold.items():
+                counts[min(d, max_depth)][key][1] += proj(s) in pred_proj
+
+    def f1(p_hits, g_hits, np_, ng):
+        p = p_hits / np_ if np_ else 0.0
+        r = g_hits / ng if ng else 0.0
+        return 2 * p * r / (p + r) if p + r else 0.0
+
+    depths = sorted(set(n_pred) | set(n_gold))
+    tot_pred, tot_gold = sum(n_pred.values()), sum(n_gold.values())
+    overall = {k: f1(sum(counts[d][k][0] for d in depths), sum(counts[d][k][1] for d in depths),
+                     tot_pred, tot_gold) for k in _PROJECTIONS}
+    by_depth = {d: {"n_gold": n_gold[d], "n_pred": n_pred[d],
+                    **{k: f1(*counts[d][k], n_pred[d], n_gold[d]) for k in _PROJECTIONS}}
+                for d in depths}
+    return {"overall": overall, "by_depth": by_depth, "max_depth": max_depth}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", default=DATA_DIR, help="directory with TRAINING/ and TEST/")
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--hidden", type=int, default=512)
-    ap.add_argument("--dropout", type=float, default=0.3)
-    ap.add_argument("--device", default=default_device())
-    ap.add_argument("--cache", help="cache SpanBERT document encodings in this file")
-    ap.add_argument("--save", help="save the trained classifier here")
-    ap.add_argument("--load", help="skip training and load a saved classifier")
+    ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--save", help="pickle the trained model here")
+    ap.add_argument("--load", help="skip training and load a pickled model")
+    ap.add_argument("--max-depth", type=int, default=10,
+                    help="pool spans deeper than this into one bucket in the depth breakdown")
     args = ap.parse_args()
 
-    cache = torch.load(args.cache) if args.cache and os.path.exists(args.cache) else {}
-    encoder = SpanEncoder(args.device)
     test = load_corpus(os.path.join(args.data, "TEST"))
     if args.load:
-        ckpt = torch.load(args.load, map_location=args.device)
-        model = ActionMLP(3 * encoder.bert.config.hidden_size, len(ckpt["vocab"]),
-                          len(ckpt["actions"]), hidden=ckpt["hidden"]).to(args.device)
-        model.load_state_dict(ckpt["state_dict"])
-        parser = ShiftReduceParser(encoder, ckpt["actions"], ckpt["vocab"], model.eval(), cache)
+        with open(args.load, "rb") as f:
+            parser = ShiftReduceParser(Perceptron.from_plain(pickle.load(f)))
     else:
         train = load_corpus(os.path.join(args.data, "TRAINING"))
         print(f"{len(train)} training docs, {len(test)} test docs")
-        parser = ShiftReduceParser(encoder, cache=cache)
-        parser.train(train, epochs=args.epochs, lr=args.lr, hidden=args.hidden,
-                     dropout=args.dropout)
+        parser = ShiftReduceParser()
+        parser.train(train, epochs=args.epochs)
         if args.save:
-            torch.save({"actions": parser.actions, "vocab": parser.vocab, "hidden": args.hidden,
-                        "state_dict": parser.model.state_dict()}, args.save)
+            with open(args.save, "wb") as f:
+                pickle.dump(parser.model.to_plain(), f)
 
-    scores = evaluate(parser, test)
-    if args.cache:
-        torch.save(parser.cache, args.cache)
-    for metric, score in scores.items():
+    results = evaluate(parser, test, max_depth=args.max_depth)
+    for metric, score in results["overall"].items():
         print(f"{metric:>10}: {score:.4f}")
+
+    print(f"\n{'depth':>6} {'#gold':>6} {'#pred':>6} {'S':>7} {'N':>7} {'R':>7} {'F':>7}")
+    for d, row in results["by_depth"].items():
+        label = f"{d}+" if d == results["max_depth"] else str(d)
+        print(f"{label:>6} {row['n_gold']:>6} {row['n_pred']:>6} {row['span']:>7.4f} "
+              f"{row['nuclearity']:>7.4f} {row['relation']:>7.4f} {row['full']:>7.4f}")
 
 
 if __name__ == "__main__":
