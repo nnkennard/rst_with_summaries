@@ -43,6 +43,15 @@ _COARSE = {
 }
 
 FINE2COARSE = {fine: coarse for coarse, fines in _COARSE.items() for fine in fines}
+FINE2COARSE['span'] = 'span' # Added for convenience
+
+def coarsen(coarse_label:str) -> str:
+    temp = coarse_label.strip().lower()
+    if temp[-2:] in ["-e", "-n", "-s"]: # Marked for embeddedness or nuclearity
+        return FINE2COARSE[temp[:-2]]
+    else:
+        return FINE2COARSE[temp]
+
 
 ERROR_INDICATOR = "//TT_ERR"
 
