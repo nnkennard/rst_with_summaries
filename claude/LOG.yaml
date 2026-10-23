@@ -3,3 +3,10 @@
   prompt: "python code to read rst discourse treebank, convert trees to python format, right binarize and convert to coarse labels"
   filename: rstdt.py
   model: "Opus 5.5 Medium"
+-
+  timestamp: 1792782340
+  prompt: "python code to generate a request for the Claude API, with a prompt to summarize the given text to within a certain token length."
+  filename: summarize.py
+  model: "Opus 5.5 Medium"
+
+
