@@ -28,57 +28,57 @@ from typing import Optional, cast
 # Coarse relation mapping (18 classes; Carlson et al. 2001, Table 1)
 # ---------------------------------------------------------------------------
 
-_COARSE_CLASSES = {
-    "Attribution": ["attribution", "attribution-negative"],
-    "Background": ["background", "circumstance"],
-    "Cause": ["cause", "result", "consequence", "consequence-n", "consequence-s",
-              "cause-result"],
-    "Comparison": ["comparison", "preference", "analogy", "proportion"],
-    "Condition": ["condition", "hypothetical", "contingency", "otherwise"],
-    "Contrast": ["contrast", "concession", "antithesis"],
-    "Elaboration": ["elaboration-additional", "elaboration-general-specific",
-                    "elaboration-part-whole", "elaboration-process-step",
-                    "elaboration-object-attribute", "elaboration-set-member",
-                    "example", "definition"],
-    "Enablement": ["purpose", "enablement"],
-    "Evaluation": ["evaluation", "evaluation-n", "evaluation-s", "interpretation",
-                   "interpretation-n", "interpretation-s", "conclusion", "comment"],
-    "Explanation": ["evidence", "explanation-argumentative", "reason"],
-    "Joint": ["list", "disjunction"],
-    "Manner-Means": ["manner", "means"],
-    "Topic-Comment": ["problem-solution", "problem-solution-n", "problem-solution-s",
-                      "question-answer", "question-answer-n", "question-answer-s",
-                      "statement-response", "statement-response-n",
-                      "statement-response-s", "topic-comment", "comment-topic",
-                      "rhetorical-question"],
-    "Summary": ["summary", "summary-n", "summary-s", "restatement"],
-    "Temporal": ["temporal-before", "temporal-after", "temporal-same-time",
-                 "sequence", "inverted-sequence"],
-    "Topic-Change": ["topic-shift", "topic-drift"],
-    "Textual-Organization": ["textualorganization", "textual-organization"],
-    "Same-Unit": ["same-unit"],
-}
+# _COARSE_CLASSES = {
+#     "Attribution": ["attribution", "attribution-negative"],
+#     "Background": ["background", "circumstance"],
+#     "Cause": ["cause", "result", "consequence", "consequence-n", "consequence-s",
+#               "cause-result"],
+#     "Comparison": ["comparison", "preference", "analogy", "proportion"],
+#     "Condition": ["condition", "hypothetical", "contingency", "otherwise"],
+#     "Contrast": ["contrast", "concession", "antithesis"],
+#     "Elaboration": ["elaboration-additional", "elaboration-general-specific",
+#                     "elaboration-part-whole", "elaboration-process-step",
+#                     "elaboration-object-attribute", "elaboration-set-member",
+#                     "example", "definition"],
+#     "Enablement": ["purpose", "enablement"],
+#     "Evaluation": ["evaluation", "evaluation-n", "evaluation-s", "interpretation",
+#                    "interpretation-n", "interpretation-s", "conclusion", "comment"],
+#     "Explanation": ["evidence", "explanation-argumentative", "reason"],
+#     "Joint": ["list", "disjunction"],
+#     "Manner-Means": ["manner", "means"],
+#     "Topic-Comment": ["problem-solution", "problem-solution-n", "problem-solution-s",
+#                       "question-answer", "question-answer-n", "question-answer-s",
+#                       "statement-response", "statement-response-n",
+#                       "statement-response-s", "topic-comment", "comment-topic",
+#                       "rhetorical-question"],
+#     "Summary": ["summary", "summary-n", "summary-s", "restatement"],
+#     "Temporal": ["temporal-before", "temporal-after", "temporal-same-time",
+#                  "sequence", "inverted-sequence"],
+#     "Topic-Change": ["topic-shift", "topic-drift"],
+#     "Textual-Organization": ["textualorganization", "textual-organization"],
+#     "Same-Unit": ["same-unit"],
+# }
 
-FINE2COARSE = {fine: coarse for coarse, fines in _COARSE_CLASSES.items() for fine in fines}
+# FINE2COARSE = {fine: coarse for coarse, fines in _COARSE_CLASSES.items() for fine in fines}
 
 
-def to_coarse(rel: Optional[str]) -> Optional[str]:
-    """Map a fine RST-DT relation to its coarse class. 'span' and None pass through."""
-    if rel is None:
-        return None
-    r = rel.strip().lower()
-    if r == "span":
-        return "span"
-    candidates = [r]
-    if r.endswith("-e"):                       # embedded variants, e.g. elaboration-additional-e
-        candidates.append(r[:-2])
-    for c in list(candidates):
-        if c.endswith(("-n", "-s")):           # nuclearity-marked variants, e.g. consequence-n-e
-            candidates.append(c[:-2])
-    for c in candidates:
-        if c in FINE2COARSE:
-            return FINE2COARSE[c]
-    raise KeyError(f"Unknown RST relation: {rel!r}")
+# def to_coarse(rel: Optional[str]) -> Optional[str]:
+#     """Map a fine RST-DT relation to its coarse class. 'span' and None pass through."""
+#     if rel is None:
+#         return None
+#     r = rel.strip().lower()
+#     if r == "span":
+#         return "span"
+#     candidates = [r]
+#     if r.endswith("-e"):                       # embedded variants, e.g. elaboration-additional-e
+#         candidates.append(r[:-2])
+#     for c in list(candidates):
+#         if c.endswith(("-n", "-s")):           # nuclearity-marked variants, e.g. consequence-n-e
+#             candidates.append(c[:-2])
+#     for c in candidates:
+#         if c in FINE2COARSE:
+#             return FINE2COARSE[c]
+#     raise KeyError(f"Unknown RST relation: {rel!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -117,27 +117,27 @@ class RSTNode:
         return f"{nuc}-{rel}"
 
     # -- conversions -------------------------------------------------------
-    def to_tuple(self):
-        """Nested tuples: (label, child, child) for internal nodes, (edu_id, text) for EDUs."""
-        if self.is_leaf:
-            return (self.span[0], self.text)
-        return (self.label(), *[c.to_tuple() for c in self.children])
+    # def to_tuple(self):
+    #     """Nested tuples: (label, child, child) for internal nodes, (edu_id, text) for EDUs."""
+    #     if self.is_leaf:
+    #         return (self.span[0], self.text)
+    #     return (self.label(), *[c.to_tuple() for c in self.children])
 
-    def to_nltk(self, leaf_text: bool = True):
-        """Convert to nltk.Tree. Leaves are EDU texts (or EDU ids if leaf_text=False)."""
-        from nltk import Tree
-        if self.is_leaf:
-            return self.text if leaf_text else str(self.span[0])
-        return Tree(self.label(), [c.to_nltk(leaf_text) for c in self.children])
+    # def to_nltk(self, leaf_text: bool = True):
+    #     """Convert to nltk.Tree. Leaves are EDU texts (or EDU ids if leaf_text=False)."""
+    #     from nltk import Tree
+    #     if self.is_leaf:
+    #         return self.text if leaf_text else str(self.span[0])
+    #     return Tree(self.label(), [c.to_nltk(leaf_text) for c in self.children])
 
-    def to_dict(self) -> dict:
-        d = {"nuclearity": self.nuclearity, "relation": self.relation, "span": list(self.span)}
-        if self.is_leaf:
-            d["text"] = self.text
-        else:
-            d["label"] = self.label()
-            d["children"] = [c.to_dict() for c in self.children]
-        return d
+    # def to_dict(self) -> dict:
+    #     d = {"nuclearity": self.nuclearity, "relation": self.relation, "span": list(self.span)}
+    #     if self.is_leaf:
+    #         d["text"] = self.text
+    #     else:
+    #         d["label"] = self.label()
+    #         d["children"] = [c.to_dict() for c in self.children]
+    #     return d
 
     def edus(self) -> list:
         return [self.text] if self.is_leaf else [e for c in self.children for e in c.edus()]
@@ -153,48 +153,48 @@ class RSTNode:
 # ---------------------------------------------------------------------------
 
 # EDU text (_!..._!) is matched first because it may contain parentheses.
-_TOKEN_RE = re.compile(r"_!.*?_!|\(|\)|[^\s()]+", re.S)
+# _TOKEN_RE = re.compile(r"_!.*?_!|\(|\)|[^\s()]+", re.S)
 
 
-def _tokens_to_lists(tokens: list):
-    stack = [[]]
-    for tok in tokens:
-        if tok == "(":
-            stack.append([])
-        elif tok == ")":
-            done = stack.pop()
-            stack[-1].append(done)
-        else:
-            stack[-1].append(tok)
-    if len(stack) != 1 or len(stack[0]) != 1:
-        raise ValueError("Unbalanced parentheses in .dis file")
-    return stack[0][0]
+# def _tokens_to_lists(tokens: list):
+#     stack = [[]]
+#     for tok in tokens:
+#         if tok == "(":
+#             stack.append([])
+#         elif tok == ")":
+#             done = stack.pop()
+#             stack[-1].append(done)
+#         else:
+#             stack[-1].append(tok)
+#     if len(stack) != 1 or len(stack[0]) != 1:
+#         raise ValueError("Unbalanced parentheses in .dis file")
+#     return stack[0][0]
 
 
-def _build(sexp: list) -> RSTNode:
-    node = RSTNode(nuclearity=sexp[0])
-    for item in sexp[1:]:
-        head = item[0]
-        if head == "span":
-            node.span = (int(item[1]), int(item[2]))
-        elif head == "leaf":
-            node.span = (int(item[1]), int(item[1]))
-        elif head == "rel2par":
-            node.relation = item[1]
-        elif head == "text":
-            node.text = " ".join(item[1:])[2:-2].strip()
-        elif head in ("Nucleus", "Satellite"):
-            node.children.append(_build(item))
-    return node
+# def _build(sexp: list) -> RSTNode:
+#     node = RSTNode(nuclearity=sexp[0])
+#     for item in sexp[1:]:
+#         head = item[0]
+#         if head == "span":
+#             node.span = (int(item[1]), int(item[2]))
+#         elif head == "leaf":
+#             node.span = (int(item[1]), int(item[1]))
+#         elif head == "rel2par":
+#             node.relation = item[1]
+#         elif head == "text":
+#             node.text = " ".join(item[1:])[2:-2].strip()
+#         elif head in ("Nucleus", "Satellite"):
+#             node.children.append(_build(item))
+#     return node
 
 
-def read_dis(path: str) -> Optional[RSTNode]:
-    """Parse one .dis file into an RSTNode tree (original n-ary, fine-grained)."""
-    with open(path, encoding="utf-8", errors="replace") as f:
-        text = f.read()
-        if "TT_ERR" in text:
-            return None
-    return _build(_tokens_to_lists(_TOKEN_RE.findall(text)))
+# def read_dis(path: str) -> Optional[RSTNode]:
+#     """Parse one .dis file into an RSTNode tree (original n-ary, fine-grained)."""
+#     with open(path, encoding="utf-8", errors="replace") as f:
+#         text = f.read()
+#         if "TT_ERR" in text:
+#             return None
+#     return _build(_tokens_to_lists(_TOKEN_RE.findall(text)))
 
 
 # ---------------------------------------------------------------------------
@@ -232,42 +232,42 @@ def right_binarize(node: RSTNode) -> RSTNode:
     return node
 
 
-def coarsen(node: RSTNode) -> RSTNode:
-    """Replace every rel2par with its coarse class, in place."""
-    node.relation = to_coarse(node.relation)
-    for c in node.children:
-        coarsen(c)
-    return node
+# def coarsen(node: RSTNode) -> RSTNode:
+#     """Replace every rel2par with its coarse class, in place."""
+#     node.relation = to_coarse(node.relation)
+#     for c in node.children:
+#         coarsen(c)
+#     return node
 
 
 # ---------------------------------------------------------------------------
 # Corpus loading
 # ---------------------------------------------------------------------------
 
-def load_tree(path: str, binarize: bool = True, coarse: bool = True) -> Optional[RSTNode]:
-    print(path)
-    tree = read_dis(path)
-    if tree is None:
-        return None
-    if binarize:
-        right_binarize(tree)
-    if coarse:
-        coarsen(tree)
-    return tree
+# def load_tree(path: str, binarize: bool = True, coarse: bool = True) -> Optional[RSTNode]:
+#     print(path)
+#     tree = read_dis(path)
+#     if tree is None:
+#         return None
+#     if binarize:
+#         right_binarize(tree)
+#     if coarse:
+#         coarsen(tree)
+#     return tree
 
 
-def load_corpus(directory: str, binarize: bool = True, coarse: bool = True) -> dict:
-    """Load all .dis files in a directory (e.g. RST-DT TRAINING or TEST)."""
-    paths = sorted(glob.glob(os.path.join(directory, "*.dis")))
-    if not paths:
-        raise FileNotFoundError(f"No .dis files found in {directory}")
-    trees = {}
-    for p in paths:
-        doc_id = os.path.basename(p).replace(".out.dis", "").replace(".dis", "")
-        maybe_tree = load_tree(p, binarize, coarse)
-        if maybe_tree is not None:
-            trees[doc_id] = cast(RSTNode, maybe_tree)
-    return trees
+# def load_corpus(directory: str, binarize: bool = True, coarse: bool = True) -> dict:
+#     """Load all .dis files in a directory (e.g. RST-DT TRAINING or TEST)."""
+#     paths = sorted(glob.glob(os.path.join(directory, "*.dis")))
+#     if not paths:
+#         raise FileNotFoundError(f"No .dis files found in {directory}")
+#     trees = {}
+#     for p in paths:
+#         doc_id = os.path.basename(p).replace(".out.dis", "").replace(".dis", "")
+#         maybe_tree = load_tree(p, binarize, coarse)
+#         if maybe_tree is not None:
+#             trees[doc_id] = cast(RSTNode, maybe_tree)
+#     return trees
 
 
 def main():

@@ -43,7 +43,6 @@ def build_node(lis: list) -> RSTNode:
             node.span = (int(item[1]), int(item[1]))
         elif head == "rel2par":
             node.relation = rst_dt_lib.coarsen(item[1])
-            print(node.relation)
         elif head == "text":
             node.text = " ".join(item[1:])[2:-2].strip()
         elif head in ("Nucleus", "Satellite"):
