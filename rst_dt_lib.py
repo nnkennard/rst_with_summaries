@@ -42,12 +42,18 @@ _COARSE = {
     "Same-Unit": ["same-unit"],
 }
 
-FINE2COARSE = {fine: coarse for coarse, fines in _COARSE.items() for fine in fines}
-FINE2COARSE['span'] = 'span' # Added for convenience
+FINE2COARSE = {
+    fine: coarse
+    for coarse, fines in _COARSE.items()
+    for fine in fines
+}
+FINE2COARSE['span'] = 'span'  # Added for convenience
 
-def coarsen(coarse_label:str) -> str:
+
+def coarsen(coarse_label: str) -> str:
     temp = coarse_label.strip().lower()
-    if temp[-2:] in ["-e", "-n", "-s"]: # Marked for embeddedness or nuclearity
+    if temp[-2:] in ["-e", "-n",
+                     "-s"]:  # Marked for embeddedness or nuclearity
         return FINE2COARSE[temp[:-2]]
     else:
         return FINE2COARSE[temp]
@@ -55,12 +61,13 @@ def coarsen(coarse_label:str) -> str:
 
 ERROR_INDICATOR = "//TT_ERR"
 
-
 # EDU text (_!..._!) is matched first because it may contain parentheses.
 _TOKEN_RE = re.compile(r"_!.*?_!|\(|\)|[^\s()]+", re.S)
 
-def is_nuclearity(label:str) -> bool:
+
+def is_nuclearity(label: str) -> bool:
     return label in "Root Nucleus Satellite".split()
+
 
 def listify_dis(filename: str) -> Optional[list]:
     with open(filename, encoding="utf-8", errors="replace") as f:
