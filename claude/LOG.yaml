@@ -10,3 +10,8 @@
   model: "Opus 5.5 Medium"
 
 
+-
+  timestamp: 1793458800
+  prompt: "Build a shift-reduce parser using SpanBERT for RST-DT (data available in rst_discourse_treebank/). Follow Guz and Carenini 2020 (https://aclanthology.org/2020.codi-1.17/). Ignore any code in the current repository; just use the data."
+  filename: sr_parser/
+  model: "Opus 5.5"

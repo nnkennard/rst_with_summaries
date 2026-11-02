@@ -1,3 +1,6 @@
 *.DS_Store
 __pycache__/*
 rst_discourse_treebank/*
+runs/
+rstdt/
+rstdt.tar
